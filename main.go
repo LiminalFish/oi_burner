@@ -153,8 +153,6 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focused = (m.focused + 1) % len(m.inputs)
 			return m, m.inputs[m.focused].Focus()
 		case "enter":
-			// Swap the whole model out. Bubble Tea won't call the new model's
-			// Init, so return its startup cmds ourselves.
 			return chat(), tea.Batch(textarea.Blink, tea.RequestWindowSize)
 		}
 	}
