@@ -26,14 +26,51 @@ func main() {
 type chatModel struct {
 	conn        *net.UDPConn
 	peer        *net.UDPAddr
+	incoming    chan string
 	viewport    viewport.Model
 	messages    []string
 	textarea    textarea.Model
 	senderStyle lipgloss.Style
+	peerStyle   lipgloss.Style
 	err         error
 }
 
-// conn is our socket, peer is who we're talking to. both nil until phase 6
+// what the reader goroutine hands back to the update loop
+type peerMsg string
+
+type connLostMsg struct{}
+
+// sits on the socket forever and feeds whatever arrives into ch
+func readLoop(conn *net.UDPConn, peer *net.UDPAddr, ch chan<- string) {
+	buf := make([]byte, 1500)
+	for {
+		n, from, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			close(ch) // socket died or got closed, tell the ui
+			return
+		}
+		// anyone who knows the ip:port could blast packets at client, so only
+		// render the ones that came from the peer the server paired us with
+		if !from.IP.Equal(peer.IP) || from.Port != peer.Port {
+			continue
+		}
+		ch <- string(buf[:n])
+	}
+}
+
+// blocks until the next message shows up. has to be re-issued after every
+// delivery, a cmd only ever produces one msg
+func recv(ch <-chan string) tea.Cmd {
+	return func() tea.Msg {
+		line, ok := <-ch
+		if !ok {
+			return connLostMsg{}
+		}
+		return peerMsg(line)
+	}
+}
+
+// conn is our socket, peer is who we're talking to
 func chat(conn *net.UDPConn, peer *net.UDPAddr) chatModel {
 	ta := textarea.New()
 	ta.Placeholder = "Send a message..."
@@ -62,13 +99,18 @@ func chat(conn *net.UDPConn, peer *net.UDPAddr) chatModel {
 	// enter will send the message instead of adding a newline
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
+	incoming := make(chan string, 16)
+	go readLoop(conn, peer, incoming)
+
 	return chatModel{
 		conn:        conn,
 		peer:        peer,
+		incoming:    incoming,
 		textarea:    ta,
 		messages:    []string{},
 		viewport:    vp,
 		senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("#4024f5")),
+		peerStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("#f52482")),
 		err:         nil,
 	}
 }
@@ -81,11 +123,19 @@ func (m *chatModel) appendMsg(line string) {
 }
 
 func (m chatModel) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, recv(m.incoming))
 }
 
 func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case peerMsg:
+		m.appendMsg(m.peerStyle.Render("0xDEADBEEF ") + string(msg))
+		return m, recv(m.incoming) // re arm for the next one
+
+	case connLostMsg:
+		m.appendMsg("!!! connection closed !!!")
+		return m, nil // nothing left to listen to so don't re arm it
+
 	case tea.WindowSizeMsg:
 		m.viewport.SetWidth(msg.Width)
 		m.textarea.SetWidth(msg.Width)
@@ -201,7 +251,8 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connectedMsg:
 		// swapping models skips the new one's Init, so i run the startup cmds here
 		// RequestWindowSize because the real WindowSizeMsg already happened on login
-		return chat(msg.conn, msg.peer), tea.Batch(textarea.Blink, tea.RequestWindowSize)
+		c := chat(msg.conn, msg.peer)
+		return c, tea.Batch(c.Init(), tea.RequestWindowSize)
 
 	case connectErrMsg:
 		m.connecting = false
