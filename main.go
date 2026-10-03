@@ -24,6 +24,8 @@ func main() {
 }
 
 type chatModel struct {
+	conn        *net.UDPConn
+	peer        *net.UDPAddr
 	viewport    viewport.Model
 	messages    []string
 	textarea    textarea.Model
@@ -31,7 +33,8 @@ type chatModel struct {
 	err         error
 }
 
-func chat() chatModel {
+// conn is our socket, peer is who we're talking to. both nil until phase 6
+func chat(conn *net.UDPConn, peer *net.UDPAddr) chatModel {
 	ta := textarea.New()
 	ta.Placeholder = "Send a message..."
 	ta.SetVirtualCursor(false)
@@ -60,12 +63,21 @@ func chat() chatModel {
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
 	return chatModel{
+		conn:        conn,
+		peer:        peer,
 		textarea:    ta,
 		messages:    []string{},
 		viewport:    vp,
 		senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("#4024f5")),
 		err:         nil,
 	}
+}
+
+// every new line goes through here so the wrapping and scrolling stay in one place
+func (m *chatModel) appendMsg(line string) {
+	m.messages = append(m.messages, line)
+	m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width()).Render(strings.Join(m.messages, "\n")))
+	m.viewport.GotoBottom()
 }
 
 func (m chatModel) Init() tea.Cmd {
@@ -91,10 +103,18 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			fmt.Println(m.textarea.Value())
 			return m, tea.Quit
 		case "enter":
-			m.messages = append(m.messages, m.senderStyle.Render("You: ")+m.textarea.Value())
-			m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width()).Render(strings.Join(m.messages, "\n")))
+			text := m.textarea.Value()
+			if text == "" {
+				return m, nil
+			}
+			// one message per datagram, no framing. the write just hands the
+			// bytes to the kernel, so it's cheap enough to do inline
+			if _, err := m.conn.WriteToUDP([]byte(text), m.peer); err != nil {
+				m.appendMsg("!!ERR!! send failed: " + err.Error())
+				return m, nil
+			}
+			m.appendMsg(m.senderStyle.Render("You: ") + text)
 			m.textarea.Reset()
-			m.viewport.GotoBottom()
 			return m, nil
 		default:
 			// Sends all other keypresses to the textarea.
@@ -150,7 +170,13 @@ func connect(room, pass string) tea.Cmd {
 		if pass == "fail" {
 			return connectErrMsg{errors.New("wrong room code or password")}
 		}
-		return connectedMsg{} // conn and peer stay nil until the server exists
+		// until the server exists, talk to ourselves on loopback so conn and
+		// peer are real and nothing will be nil
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			return connectErrMsg{err}
+		}
+		return connectedMsg{conn: conn, peer: conn.LocalAddr().(*net.UDPAddr)}
 	}
 }
 
@@ -175,7 +201,7 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connectedMsg:
 		// swapping models skips the new one's Init, so i run the startup cmds here
 		// RequestWindowSize because the real WindowSizeMsg already happened on login
-		return chat(), tea.Batch(textarea.Blink, tea.RequestWindowSize)
+		return chat(msg.conn, msg.peer), tea.Batch(textarea.Blink, tea.RequestWindowSize)
 
 	case connectErrMsg:
 		m.connecting = false
