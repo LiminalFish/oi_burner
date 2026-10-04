@@ -39,6 +39,7 @@ type chatModel struct {
 	peerStyle   lipgloss.Style
 	burned      bool
 	lastHeard   time.Time
+	sendErr     error // last local write failure, nil while sends are leaving fine
 }
 
 // every datagram is one of these, his module uses the same shape
@@ -54,11 +55,10 @@ const (
 )
 
 const (
-	heartbeatEvery = 15 * time.Second
-	peerTimeout    = 45 * time.Second // three missed beats
+	heartbeatEvery = 5 * time.Second
+	peerTimeout    = 15 * time.Second // three missed beats
 )
 
-// marshal never fails on this struct, so the error isn't worth carrying around
 func send(conn *net.UDPConn, to *net.UDPAddr, p packet) error {
 	b, _ := json.Marshal(p)
 	_, err := conn.WriteToUDP(b, to)
@@ -206,15 +206,21 @@ func (m chatModel) Init() tea.Cmd {
 	return tea.Batch(recv(m.incoming), beat())
 }
 
-// the footer, green while the peer is answering, amber once it goes silent.
-// only redraws when something happens, so the elapsed time steps in 15s jumps
+// the footer. only redraws when something happens, so the elapsed time steps
+// along with the heartbeat rather than ticking every second
 func (m chatModel) statusLine() string {
 	color, text := "#3ddc84", "\u25cf connected"
 
-	// no heartbeat back this long means the link is gone
-	if quiet := time.Since(m.lastHeard); quiet > peerTimeout {
+	switch {
+	// our own write failed, so the packet never left this machine. known
+	// straight away, no waiting on a timeout
+	case m.sendErr != nil:
+		color, text = "#f5245e", "\u2715 offline | messages cannot send"
+
+	// sends are leaving fine but nothing comes back, so it's them or the path
+	case time.Since(m.lastHeard) > peerTimeout:
 		color = "#f5a524"
-		text = "\u25cb no response for " + quiet.Round(time.Second).String()
+		text = "\u25cb disconnected? time since last ping: " + time.Since(m.lastHeard).Round(time.Second).String()
 	}
 
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(text)
@@ -223,9 +229,7 @@ func (m chatModel) statusLine() string {
 func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case beatMsg:
-		// ===== PENDING MODULE =====
-		// swap for: PeerHeartbeat(m.conn, m.peer). the tea.Tick that schedules
-		send(m.conn, m.peer, packet{Action: actionHeartbeat})
+		m.sendErr = send(m.conn, m.peer, packet{Action: actionHeartbeat})
 		return m, beat() // the tick is also what refreshes the footer
 
 	case peerHeartbeatMsg:
@@ -279,8 +283,9 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// ===== PENDING MODULE =====
 			// swap for: SendMessage(m.conn, m.peer, text), once it returns error
-			if err := send(m.conn, m.peer, packet{Action: actionMessage, Message: text}); err != nil {
-				m.appendMsg("!!ERR!! send failed: " + err.Error())
+			m.sendErr = send(m.conn, m.peer, packet{Action: actionMessage, Message: text})
+			if m.sendErr != nil {
+				m.appendMsg("!!ERR!! send failed: " + m.sendErr.Error())
 				return m, nil
 			}
 
