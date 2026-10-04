@@ -181,6 +181,7 @@ func chat(conn *net.UDPConn, peer *net.UDPAddr, pass string) chatModel {
 		viewport:    vp,
 		senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("#4024f5")),
 		peerStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("#f52482")),
+		pass:        pass,
 	}
 }
 
