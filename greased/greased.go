@@ -146,7 +146,7 @@ func DestroySession(local *net.UDPConn, peer *net.UDPAddr) {
 func Encrypt(message string, password string) string {
 	cipher, err := aes.NewCipher([]byte(password))
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln("Error in Encrypt:\t", err)
 	}
 
 	var dst []byte
@@ -158,7 +158,7 @@ func Encrypt(message string, password string) string {
 func Decrypt(message string, password string) string {
 	cipher, err := aes.NewCipher([]byte(password))
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln("Error in Decrypt:\t", err)
 	}
 
 	var dst []byte
