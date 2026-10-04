@@ -1,0 +1,91 @@
+// package main
+
+import (
+	"bufio"
+	"fmt"
+	"greased/greased"
+	"net"
+	"os"
+	"strconv"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: go run main.go <port>")
+		return
+	}
+
+	port, _ := strconv.ParseInt(os.Args[1], 10, 0)
+
+	roomID := "goon"
+	password := "belt"
+
+	// 1. Initialize local UDP socket and STUN server reference (non-blocking)
+	local, stun := greased.InitClient(int(port), "127.0.0.1:2121")
+	defer local.Close()
+
+	// 2. Register/Join the room on the STUN server
+	greased.RegisterRoom(local, stun, roomID, password)
+
+	fmt.Println("[*] Waiting for peer... Type 'cancel' or 'destroy' to abort.")
+
+	connectedChan := make(chan struct{})
+	var peer *net.UDPAddr
+
+	// 3. Single background goroutine for reading stdin to avoid stream conflicts
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Err()
+		for scanner.Scan() {
+			text := scanner.Text()
+			if text == "" {
+				continue
+			}
+
+			select {
+			case <-connectedChan:
+				// Once connected, send chat messages to peer
+				if peer != nil {
+					if text == "/destroy" {
+						greased.DestroySession(local, peer)
+						fmt.Println("[*] Room Destroyed")
+						os.Exit(0)
+					}
+					greased.SendMessage(local, peer, text)
+				}
+			default:
+				// While waiting, check for cancellation commands
+				if text == "cancel" || text == "destroy" {
+					greased.EarlyDestruct(local, stun, roomID, password)
+					fmt.Println("[*] Room early-destroyed by user command. Exiting...")
+					os.Exit(0)
+				} else {
+					fmt.Println("[!] Still waiting for peer. Type 'cancel' to abort.")
+				}
+			}
+		}
+	}()
+
+	// 4. Block and wait for the second peer to join
+	peer = greased.WaitForPeer(local, stun)
+
+	// Signal to the stdin handler that we are now connected
+	close(connectedChan)
+
+	// 5. Perform UDP hole punching to establish direct P2P connection
+	greased.HolePunch(local, peer)
+	fmt.Println("[+] Connected! Type your messages below:")
+
+	// 6. Main loop to read incoming messages from peer
+	buf := make([]byte, 2048)
+	for {
+		n, remoteAddr, err := local.ReadFromUDP(buf)
+		if err != nil {
+			continue
+		}
+
+		if remoteAddr.String() == peer.String() {
+			fmt.Printf("Peer: %s\n", string(buf[:n]))
+		}
+	}
+}
