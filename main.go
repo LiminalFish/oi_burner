@@ -39,7 +39,6 @@ type chatModel struct {
 	peerStyle   lipgloss.Style
 	burned      bool
 	lastHeard   time.Time
-	peerGone    bool
 }
 
 // every datagram is one of these, his module uses the same shape
@@ -96,18 +95,22 @@ func readLoop(conn *net.UDPConn, peer *net.UDPAddr, ch chan<- tea.Msg) {
 		if !from.IP.Equal(peer.IP) || from.Port != peer.Port {
 			continue
 		}
+
 		var p packet
 		if json.Unmarshal(buf[:n], &p) == nil {
 			switch p.Action {
+
 			case actionMessage:
 				ch <- peerMsg(p.Message)
+
 			case actionDestroy:
 				ch <- peerBurnMsg{}
+
 			case actionHeartbeat:
 				ch <- peerHeartbeatMsg{}
 			}
 		}
-		clear(buf) // don't leave the last datagram sitting in here
+		clear(buf) // don't leave the last datagram sitting
 	}
 }
 
@@ -174,6 +177,8 @@ func (m *chatModel) burn(notify bool) {
 		if notify {
 			// udp may drops packets so say it three times
 			for range 3 {
+				// ===== PENDING MODULE =====
+				// swap for: DestroySession(m.conn, m.peer)
 				send(m.conn, m.peer, packet{Action: actionDestroy})
 			}
 		}
@@ -201,32 +206,34 @@ func (m chatModel) Init() tea.Cmd {
 	return tea.Batch(recv(m.incoming), beat())
 }
 
-// anything arriving from the peer counts as a sign of life
-func (m *chatModel) heard() {
-	m.lastHeard = time.Now()
-	if m.peerGone {
-		m.peerGone = false
-		m.appendMsg("!!! peer is back !!!")
+// the footer, green while the peer is answering, amber once it goes silent.
+// only redraws when something happens, so the elapsed time steps in 15s jumps
+func (m chatModel) statusLine() string {
+	color, text := "#3ddc84", "\u25cf connected"
+
+	// no heartbeat back this long means the link is gone
+	if quiet := time.Since(m.lastHeard); quiet > peerTimeout {
+		color = "#f5a524"
+		text = "\u25cb no response for " + quiet.Round(time.Second).String()
 	}
+
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(text)
 }
 
 func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case beatMsg:
+		// ===== PENDING MODULE =====
+		// swap for: PeerHeartbeat(m.conn, m.peer). the tea.Tick that schedules
 		send(m.conn, m.peer, packet{Action: actionHeartbeat})
-		// silence this long means the nat hole probably closed on them
-		if !m.peerGone && time.Since(m.lastHeard) > peerTimeout {
-			m.peerGone = true
-			m.appendMsg("!!! peer went quiet !!!")
-		}
-		return m, beat()
+		return m, beat() // the tick is also what refreshes the footer
 
 	case peerHeartbeatMsg:
-		m.heard()
+		m.lastHeard = time.Now()
 		return m, recv(m.incoming)
 
 	case peerMsg:
-		m.heard()
+		m.lastHeard = time.Now()
 		m.appendMsg(m.peerStyle.Render("0xDEADBEEF: ") + string(msg))
 		return m, recv(m.incoming) // re arm for the next one
 
@@ -242,7 +249,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.viewport.SetWidth(msg.Width)
 		m.textarea.SetWidth(msg.Width)
-		m.viewport.SetHeight(msg.Height - m.textarea.Height())
+		m.viewport.SetHeight(msg.Height - m.textarea.Height() - 1) // -1 for the status line
 
 		m.render() // rewrap the backlog at the new width
 	case tea.KeyPressMsg:
@@ -269,17 +276,23 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// one message per datagram, no framing. the write just hands the
 			// bytes to the kernel, so it's cheap enough to do inline
+
+			// ===== PENDING MODULE =====
+			// swap for: SendMessage(m.conn, m.peer, text), once it returns error
 			if err := send(m.conn, m.peer, packet{Action: actionMessage, Message: text}); err != nil {
 				m.appendMsg("!!ERR!! send failed: " + err.Error())
 				return m, nil
 			}
+
 			m.appendMsg(m.senderStyle.Render("You: ") + text)
 			m.textarea.Reset()
+
 			return m, nil
 		default:
 			// Sends all other keypresses to the textarea.
 			var cmd tea.Cmd
 			m.textarea, cmd = m.textarea.Update(msg)
+
 			return m, cmd
 		}
 
@@ -290,7 +303,8 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m chatModel) View() tea.View {
 	viewportView := m.viewport.View()
-	v := tea.NewView(viewportView + "\n" + m.textarea.View())
+	// status goes below the textarea so it doesn't shift the cursor
+	v := tea.NewView(viewportView + "\n" + m.textarea.View() + "\n" + m.statusLine())
 
 	// textarea reports its cursor relative to itself, so push it down past
 	// the viewport to get where it actually sits on screen
@@ -318,6 +332,12 @@ type connectedMsg struct {
 type connectErrMsg struct{ err error }
 
 // this will be the UDP handshake logic later I think
+// ===== PENDING HIS MODULE =====
+// this whole body is a stub. his punch/connect call replaces everything inside
+// and has to hand back the SAME socket it handshook on, a fresh one loses the
+// nat hole. the STUN heartbeat while waiting for the other peer lives in there
+// too, not out here
+// =============================================================================
 func connect(room, pass string) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(3000 * time.Millisecond)
@@ -380,7 +400,10 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
-				// TODO: add the room closer function thingy here
+				// ===== PENDING HIS MODULE =====
+				// EarlyDestruct(conn, stun, room, pass) goes here so the server
+				// stops holding a half matched room. blocked: we don't have the
+				// stun address or the conn on this screen yet
 				m.connecting = false
 				m.err = errors.New("Connection attempt revoked, room closed.")
 			}
