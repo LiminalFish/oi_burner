@@ -153,6 +153,10 @@ func Encrypt(message string, password string) (string, error) {
 
 	cf, err := aes.NewCipher(key[:])
 
+	if err != nil {
+		log.Fatalln("Error in Encrypt:\t", err)
+	}
+
 	gcm, _ := cipher.NewGCM(cf)
 
 	nonce := make([]byte, gcm.NonceSize())
@@ -160,10 +164,6 @@ func Encrypt(message string, password string) (string, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 		// log.Fatalln(err)
-	}
-
-	if err != nil {
-		log.Fatalln("Error in Encrypt:\t", err)
 	}
 
 	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte(message), nil)), nil
