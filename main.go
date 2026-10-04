@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -8,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/cursor"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
@@ -38,19 +38,47 @@ type chatModel struct {
 	senderStyle lipgloss.Style
 	peerStyle   lipgloss.Style
 	burned      bool
-	err         error
+	lastHeard   time.Time
+	peerGone    bool
 }
 
-// first byte of every datagram says what it is
+// every datagram is one of these, his module uses the same shape
+type packet struct {
+	Action  string `json:"action"`
+	Message string `json:"message,omitempty"`
+}
+
 const (
-	kindMsg  = 'm'
-	kindBurn = 'b'
+	actionMessage   = "MESSAGE"
+	actionDestroy   = "DESTROY"
+	actionHeartbeat = "HEARTBEAT"
 )
+
+const (
+	heartbeatEvery = 15 * time.Second
+	peerTimeout    = 45 * time.Second // three missed beats
+)
+
+// marshal never fails on this struct, so the error isn't worth carrying around
+func send(conn *net.UDPConn, to *net.UDPAddr, p packet) error {
+	b, _ := json.Marshal(p)
+	_, err := conn.WriteToUDP(b, to)
+	return err
+}
 
 // what the reader goroutine hands back to the update loop
 type peerMsg string
 
 type peerBurnMsg struct{}
+
+type peerHeartbeatMsg struct{}
+
+// fires on a timer, tells us to send our own heartbeat
+type beatMsg struct{}
+
+func beat() tea.Cmd {
+	return tea.Tick(heartbeatEvery, func(time.Time) tea.Msg { return beatMsg{} })
+}
 
 type connLostMsg struct{}
 
@@ -68,12 +96,15 @@ func readLoop(conn *net.UDPConn, peer *net.UDPAddr, ch chan<- tea.Msg) {
 		if !from.IP.Equal(peer.IP) || from.Port != peer.Port {
 			continue
 		}
-		if n > 0 {
-			switch buf[0] {
-			case kindMsg:
-				ch <- peerMsg(string(buf[1:n]))
-			case kindBurn:
+		var p packet
+		if json.Unmarshal(buf[:n], &p) == nil {
+			switch p.Action {
+			case actionMessage:
+				ch <- peerMsg(p.Message)
+			case actionDestroy:
 				ch <- peerBurnMsg{}
+			case actionHeartbeat:
+				ch <- peerHeartbeatMsg{}
 			}
 		}
 		clear(buf) // don't leave the last datagram sitting in here
@@ -121,6 +152,7 @@ func chat(conn *net.UDPConn, peer *net.UDPAddr) chatModel {
 	// enter will send the message instead of adding a newline
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
+	lastHeard := time.Now()
 	incoming := make(chan tea.Msg, 16)
 	go readLoop(conn, peer, incoming)
 
@@ -128,12 +160,12 @@ func chat(conn *net.UDPConn, peer *net.UDPAddr) chatModel {
 		conn:        conn,
 		peer:        peer,
 		incoming:    incoming,
+		lastHeard:   lastHeard,
 		textarea:    ta,
 		messages:    []string{},
 		viewport:    vp,
 		senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("#4024f5")),
 		peerStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("#f52482")),
-		err:         nil,
 	}
 }
 
@@ -142,7 +174,7 @@ func (m *chatModel) burn(notify bool) {
 		if notify {
 			// udp may drops packets so say it three times
 			for range 3 {
-				m.conn.WriteToUDP([]byte{kindBurn}, m.peer)
+				send(m.conn, m.peer, packet{Action: actionDestroy})
 			}
 		}
 		m.conn.Close()
@@ -153,20 +185,48 @@ func (m *chatModel) burn(notify bool) {
 	m.burned = true
 }
 
-// every new line goes through here so the wrapping and scrolling stay in one place
-func (m *chatModel) appendMsg(line string) {
-	m.messages = append(m.messages, line)
+// wraps the backlog to the current width and pins us to the newest line
+func (m *chatModel) render() {
 	m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width()).Render(strings.Join(m.messages, "\n")))
 	m.viewport.GotoBottom()
 }
 
+// every new line goes through here so the wrapping and scrolling stay in one place
+func (m *chatModel) appendMsg(line string) {
+	m.messages = append(m.messages, line)
+	m.render()
+}
+
 func (m chatModel) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, recv(m.incoming))
+	return tea.Batch(recv(m.incoming), beat())
+}
+
+// anything arriving from the peer counts as a sign of life
+func (m *chatModel) heard() {
+	m.lastHeard = time.Now()
+	if m.peerGone {
+		m.peerGone = false
+		m.appendMsg("!!! peer is back !!!")
+	}
 }
 
 func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case beatMsg:
+		send(m.conn, m.peer, packet{Action: actionHeartbeat})
+		// silence this long means the nat hole probably closed on them
+		if !m.peerGone && time.Since(m.lastHeard) > peerTimeout {
+			m.peerGone = true
+			m.appendMsg("!!! peer went quiet !!!")
+		}
+		return m, beat()
+
+	case peerHeartbeatMsg:
+		m.heard()
+		return m, recv(m.incoming)
+
 	case peerMsg:
+		m.heard()
 		m.appendMsg(m.peerStyle.Render("0xDEADBEEF: ") + string(msg))
 		return m, recv(m.incoming) // re arm for the next one
 
@@ -184,11 +244,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea.SetWidth(msg.Width)
 		m.viewport.SetHeight(msg.Height - m.textarea.Height())
 
-		if len(m.messages) > 0 {
-			// Wrap content before setting it.
-			m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width()).Render(strings.Join(m.messages, "\n")))
-		}
-		m.viewport.GotoBottom()
+		m.render() // rewrap the backlog at the new width
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
@@ -213,7 +269,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// one message per datagram, no framing. the write just hands the
 			// bytes to the kernel, so it's cheap enough to do inline
-			if _, err := m.conn.WriteToUDP(append([]byte{kindMsg}, text...), m.peer); err != nil {
+			if err := send(m.conn, m.peer, packet{Action: actionMessage, Message: text}); err != nil {
 				m.appendMsg("!!ERR!! send failed: " + err.Error())
 				return m, nil
 			}
@@ -227,11 +283,6 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-	case cursor.BlinkMsg:
-		// Textarea should also process cursor blinks.
-		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg)
-		return m, cmd
 	}
 
 	return m, nil
