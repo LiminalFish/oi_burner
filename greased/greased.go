@@ -2,7 +2,12 @@ package greased
 
 import (
 	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -143,26 +148,52 @@ func DestroySession(local *net.UDPConn, peer *net.UDPAddr) {
 	local.WriteToUDP(command, peer)
 }
 
-func Encrypt(message string, password string) string {
-	cipher, err := aes.NewCipher([]byte(password))
+func Encrypt(message string, password string) (string, error) {
+	key := sha256.Sum256([]byte(password))
+
+	cf, err := aes.NewCipher(key[:])
+
+	gcm, _ := cipher.NewGCM(cf)
+
+	nonce := make([]byte, gcm.NonceSize())
+
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+		// log.Fatalln(err)
+	}
+
 	if err != nil {
 		log.Fatalln("Error in Encrypt:\t", err)
 	}
 
-	var dst []byte
-	cipher.Encrypt(dst, []byte(message))
-
-	return string(dst)
+	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte(message), nil)), nil
 }
 
-func Decrypt(message string, password string) string {
-	cipher, err := aes.NewCipher([]byte(password))
+func Decrypt(message string, password string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(message)
+
 	if err != nil {
-		log.Fatalln("Error in Decrypt:\t", err)
+		log.Fatalln(err)
 	}
 
-	var dst []byte
-	cipher.Decrypt(dst, []byte(message))
+	key := sha256.Sum256([]byte(password))
 
-	return string(dst)
+	cf, err := aes.NewCipher(key[:])
+
+	gcm, _ := cipher.NewGCM(cf)
+
+	if len(raw) < gcm.NonceSize() {
+		return "", errors.New("Packet too short")
+	}
+
+	nonce, ct := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
+
+	plain, err := gcm.Open(nil, nonce, ct, nil)
+
+	if err != nil {
+		return "", err
+	}
+
+	return string(plain), nil
+
 }
