@@ -49,6 +49,7 @@ type chatModel struct {
 	burned      bool
 	lastHeard   time.Time
 	sendErr     error // last local write failure, nil while sends are leaving fine
+	pass        string
 }
 
 // every datagram is one of these, his module uses the same shape
@@ -138,7 +139,7 @@ func recv(ch <-chan tea.Msg) tea.Cmd {
 }
 
 // conn is our socket, peer is who we're talking to
-func chat(conn *net.UDPConn, peer *net.UDPAddr) chatModel {
+func chat(conn *net.UDPConn, peer *net.UDPAddr, pass string) chatModel {
 	ta := textarea.New()
 	ta.Placeholder = "Send a message..."
 	ta.SetVirtualCursor(false)
@@ -278,7 +279,6 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			text := m.textarea.Value()
-
 			if text == "" {
 				return m, nil
 			}
@@ -290,8 +290,8 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// one message per datagram, no framing. the write just hands the
 			// bytes to the kernel, so it's cheap enough to do inline
-
-			greased.SendMessage(m.conn, m.peer, text)
+			encrypted := greased.Encrypt(text, m.pass)
+			greased.SendMessage(m.conn, m.peer, encrypted)
 
 			m.appendMsg(m.senderStyle.Render("You: ") + text)
 			m.textarea.Reset()
@@ -339,6 +339,7 @@ type loginModel struct {
 type connectedMsg struct {
 	conn *net.UDPConn
 	peer *net.UDPAddr
+	pass string
 }
 
 type connectErrMsg struct{ err error }
@@ -349,7 +350,7 @@ func connect(room, pass string, local *net.UDPConn, stunAddr *net.UDPAddr) tea.C
 		peerAddr := greased.WaitForPeer(local, stunAddr)
 		greased.HolePunch(local, peerAddr)
 
-		return connectedMsg{conn: local, peer: peerAddr}
+		return connectedMsg{conn: local, peer: peerAddr, pass: pass}
 	}
 }
 
@@ -381,7 +382,7 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// swapping models skips the new one's Init, so i run the startup cmds here
 		// RequestWindowSize because the real WindowSizeMsg already happened on login
-		c := chat(msg.conn, msg.peer)
+		c := chat(msg.conn, msg.peer, msg.pass)
 		return c, tea.Batch(c.Init(), tea.RequestWindowSize)
 
 	case connectErrMsg:
