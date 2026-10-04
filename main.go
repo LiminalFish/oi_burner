@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"oi_burner/greased"
 	"os"
@@ -246,7 +247,10 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case peerMsg:
 		m.lastHeard = time.Now()
-		decrypted := greased.Decrypt(string(msg), m.pass)
+		decrypted, err := greased.Decrypt(string(msg), m.pass)
+		if err != nil {
+			return m, recv(m.incoming)
+		}
 		m.appendMsg(m.peerStyle.Render("0xDEADBEEF: ") + string(decrypted))
 		return m, recv(m.incoming) // re arm for the next one
 
@@ -292,7 +296,10 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// one message per datagram, no framing. the write just hands the
 			// bytes to the kernel, so it's cheap enough to do inline
-			encrypted := greased.Encrypt(text, m.pass)
+			encrypted, err := greased.Encrypt(text, m.pass)
+			if err != nil {
+				log.Fatalln(err)
+			}
 			greased.SendMessage(m.conn, m.peer, encrypted)
 
 			m.appendMsg(m.senderStyle.Render("You: ") + text)
