@@ -19,7 +19,7 @@ import (
 
 const (
 	localport    = 7001
-	stunserverip = "127.0.0.1:2121"
+	stunserverip = "10.246.152.124:2121"
 )
 
 func main() {
