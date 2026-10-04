@@ -167,7 +167,7 @@ func (m chatModel) Init() tea.Cmd {
 func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case peerMsg:
-		m.appendMsg(m.peerStyle.Render("0xDEADBEEF ") + string(msg))
+		m.appendMsg(m.peerStyle.Render("0xDEADBEEF: ") + string(msg))
 		return m, recv(m.incoming) // re arm for the next one
 
 	case peerBurnMsg:
@@ -269,7 +269,7 @@ type connectErrMsg struct{ err error }
 // this will be the UDP handshake logic later I think
 func connect(room, pass string) tea.Cmd {
 	return func() tea.Msg {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(3000 * time.Millisecond)
 		// temp logic to uhh show the uhh fail screen
 		if pass == "fail" {
 			return connectErrMsg{errors.New("wrong room code or password")}
@@ -303,21 +303,35 @@ func (m loginModel) Init() tea.Cmd { return textinput.Blink }
 func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case connectedMsg:
+		// cancelled while this was still in flight, throw the socket away
+		if !m.connecting {
+			if msg.conn != nil {
+				msg.conn.Close()
+			}
+			return m, nil
+		}
 		// swapping models skips the new one's Init, so i run the startup cmds here
 		// RequestWindowSize because the real WindowSizeMsg already happened on login
 		c := chat(msg.conn, msg.peer)
 		return c, tea.Batch(c.Init(), tea.RequestWindowSize)
 
 	case connectErrMsg:
+		if !m.connecting {
+			return m, nil // already cancelled, nothing to report
+		}
 		m.connecting = false
 		m.err = msg.err
 		return m, nil
 
 	case tea.KeyPressMsg:
-		// swallow input mid-handshake so enter can't send a second connect request
 		if m.connecting {
-			if msg.String() == "ctrl+c" {
+			switch msg.String() {
+			case "ctrl+c":
 				return m, tea.Quit
+			case "esc":
+				// TODO: add the room closer function thingy here
+				m.connecting = false
+				m.err = errors.New("Connection attempt revoked, room closed.")
 			}
 			return m, nil
 		}
@@ -353,9 +367,9 @@ func (m loginModel) View() tea.View {
 	status := "tab to switch \u00b7 enter to join \u00b7 esc to quit"
 	switch {
 	case m.connecting:
-		status = "Connecting\u2026"
+		status = "Waiting for peer\u2026"
 	case m.err != nil:
-		status = "\u2717 " + m.err.Error()
+		status = "!! " + m.err.Error()
 	}
 
 	v := tea.NewView("Join a room\n\n" +
