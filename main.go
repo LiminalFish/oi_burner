@@ -24,10 +24,13 @@ const (
 
 func main() {
 	p := tea.NewProgram(login())
+
 	final, err := p.Run()
+
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERR: %v\n", err)
 	}
+
 	// if a burn clear screen and scrollback buffer
 	if c, ok := final.(chatModel); ok && c.burned {
 		fmt.Print("\033[H\033[2J\033[3J")
@@ -90,13 +93,15 @@ type connLostMsg struct{}
 // sits on the socket forever and feeds whatever arrives into ch
 func readLoop(conn *net.UDPConn, peer *net.UDPAddr, ch chan<- tea.Msg) {
 	buf := make([]byte, 1500)
+
 	for {
 		n, from, err := conn.ReadFromUDP(buf)
+
 		if err != nil {
 			close(ch) // socket died or got closed, tell the ui
 			return
 		}
-		// anyone who knows the ip:port could blast packets at client, so only
+
 		// render the ones that came from the peer the server paired us with
 		if !from.IP.Equal(peer.IP) || from.Port != peer.Port {
 			continue
@@ -216,12 +221,9 @@ func (m chatModel) statusLine() string {
 	color, text := "#3ddc84", "\u25cf connected"
 
 	switch {
-	// our own write failed, so the packet never left this machine. known
-	// straight away, no waiting on a timeout
 	case m.sendErr != nil:
 		color, text = "#f5245e", "\u2715 offline | messages cannot send"
 
-	// sends are leaving fine but nothing comes back, so it's them or the path
 	case time.Since(m.lastHeard) > peerTimeout:
 		color = "#f5a524"
 		text = "\u25cb disconnected? time since last ping: " + time.Since(m.lastHeard).Round(time.Second).String()
@@ -268,15 +270,19 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.conn.Close()
 			}
 			return m, tea.Quit
+
 		case "ctrl+b":
 			// same as typing /burn, for when you need it now
 			m.burn(true)
 			return m, tea.Quit
+
 		case "enter":
 			text := m.textarea.Value()
+
 			if text == "" {
 				return m, nil
 			}
+
 			// literal match only, so you can still talk about burning
 			if text == "/burn" {
 				m.burn(true)
@@ -291,6 +297,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textarea.Reset()
 
 			return m, nil
+
 		default:
 			// Sends all other keypresses to the textarea.
 			var cmd tea.Cmd
