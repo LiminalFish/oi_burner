@@ -18,30 +18,44 @@ import (
 
 func main() {
 	p := tea.NewProgram(login())
-	if _, err := p.Run(); err != nil {
+	final, err := p.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERR: %v\n", err)
+	}
+	// if a burn clear screen and scrollback buffer
+	if c, ok := final.(chatModel); ok && c.burned {
+		fmt.Print("\033[H\033[2J\033[3J")
 	}
 }
 
 type chatModel struct {
 	conn        *net.UDPConn
 	peer        *net.UDPAddr
-	incoming    chan string
+	incoming    chan tea.Msg
 	viewport    viewport.Model
 	messages    []string
 	textarea    textarea.Model
 	senderStyle lipgloss.Style
 	peerStyle   lipgloss.Style
+	burned      bool
 	err         error
 }
+
+// first byte of every datagram says what it is
+const (
+	kindMsg  = 'm'
+	kindBurn = 'b'
+)
 
 // what the reader goroutine hands back to the update loop
 type peerMsg string
 
+type peerBurnMsg struct{}
+
 type connLostMsg struct{}
 
 // sits on the socket forever and feeds whatever arrives into ch
-func readLoop(conn *net.UDPConn, peer *net.UDPAddr, ch chan<- string) {
+func readLoop(conn *net.UDPConn, peer *net.UDPAddr, ch chan<- tea.Msg) {
 	buf := make([]byte, 1500)
 	for {
 		n, from, err := conn.ReadFromUDP(buf)
@@ -54,19 +68,27 @@ func readLoop(conn *net.UDPConn, peer *net.UDPAddr, ch chan<- string) {
 		if !from.IP.Equal(peer.IP) || from.Port != peer.Port {
 			continue
 		}
-		ch <- string(buf[:n])
+		if n > 0 {
+			switch buf[0] {
+			case kindMsg:
+				ch <- peerMsg(string(buf[1:n]))
+			case kindBurn:
+				ch <- peerBurnMsg{}
+			}
+		}
+		clear(buf) // don't leave the last datagram sitting in here
 	}
 }
 
 // blocks until the next message shows up. has to be re-issued after every
 // delivery, a cmd only ever produces one msg
-func recv(ch <-chan string) tea.Cmd {
+func recv(ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		line, ok := <-ch
+		msg, ok := <-ch
 		if !ok {
 			return connLostMsg{}
 		}
-		return peerMsg(line)
+		return msg
 	}
 }
 
@@ -99,7 +121,7 @@ func chat(conn *net.UDPConn, peer *net.UDPAddr) chatModel {
 	// enter will send the message instead of adding a newline
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
-	incoming := make(chan string, 16)
+	incoming := make(chan tea.Msg, 16)
 	go readLoop(conn, peer, incoming)
 
 	return chatModel{
@@ -113,6 +135,22 @@ func chat(conn *net.UDPConn, peer *net.UDPAddr) chatModel {
 		peerStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("#f52482")),
 		err:         nil,
 	}
+}
+
+func (m *chatModel) burn(notify bool) {
+	if m.conn != nil {
+		if notify {
+			// udp may drops packets so say it three times
+			for range 3 {
+				m.conn.WriteToUDP([]byte{kindBurn}, m.peer)
+			}
+		}
+		m.conn.Close()
+	}
+	m.messages = nil
+	m.textarea.Reset()
+	m.viewport.SetContent("")
+	m.burned = true
 }
 
 // every new line goes through here so the wrapping and scrolling stay in one place
@@ -132,6 +170,11 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendMsg(m.peerStyle.Render("0xDEADBEEF ") + string(msg))
 		return m, recv(m.incoming) // re arm for the next one
 
+	case peerBurnMsg:
+		// they burned it, so do the same here. notify false, don't echo it back
+		m.burn(false)
+		return m, tea.Quit
+
 	case connLostMsg:
 		m.appendMsg("!!! connection closed !!!")
 		return m, nil // nothing left to listen to so don't re arm it
@@ -149,17 +192,28 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
-			// dumps your unsent draft to stdout on quit & !!!!will probably need to change this
-			fmt.Println(m.textarea.Value())
+			// esc just ends the connection, it isn't a burn
+			if m.conn != nil {
+				m.conn.Close()
+			}
+			return m, tea.Quit
+		case "ctrl+b":
+			// same as typing /burn, for when you need it now
+			m.burn(true)
 			return m, tea.Quit
 		case "enter":
 			text := m.textarea.Value()
 			if text == "" {
 				return m, nil
 			}
+			// literal match only, so you can still talk about burning
+			if text == "/burn" {
+				m.burn(true)
+				return m, tea.Quit
+			}
 			// one message per datagram, no framing. the write just hands the
 			// bytes to the kernel, so it's cheap enough to do inline
-			if _, err := m.conn.WriteToUDP([]byte(text), m.peer); err != nil {
+			if _, err := m.conn.WriteToUDP(append([]byte{kindMsg}, text...), m.peer); err != nil {
 				m.appendMsg("!!ERR!! send failed: " + err.Error())
 				return m, nil
 			}
