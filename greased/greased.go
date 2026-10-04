@@ -1,6 +1,7 @@
 package greased
 
 import (
+	"crypto/aes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -140,4 +141,28 @@ func DestroySession(local *net.UDPConn, peer *net.UDPAddr) {
 	})
 
 	local.WriteToUDP(command, peer)
+}
+
+func Encrypt(message string, password string) string {
+	cipher, err := aes.NewCipher([]byte(password))
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	var dst []byte
+	cipher.Encrypt(dst, []byte(message))
+
+	return string(dst)
+}
+
+func Decrypt(message string, password string) string {
+	cipher, err := aes.NewCipher([]byte(password))
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	var dst []byte
+	cipher.Decrypt(dst, []byte(message))
+
+	return string(dst)
 }
