@@ -245,7 +245,8 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case peerMsg:
 		m.lastHeard = time.Now()
-		m.appendMsg(m.peerStyle.Render("0xDEADBEEF: ") + string(msg))
+		decrypted := greased.Decrypt(string(msg), m.pass)
+		m.appendMsg(m.peerStyle.Render("0xDEADBEEF: ") + string(decrypted))
 		return m, recv(m.incoming) // re arm for the next one
 
 	case peerBurnMsg:
