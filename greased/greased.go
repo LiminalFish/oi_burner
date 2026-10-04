@@ -36,9 +36,12 @@ func InitClient(localPort int, stun string) (*net.UDPConn, *net.UDPAddr) {
 
 // RegisterRoom sends the initial registration/join payload to the STUN server (non-blocking for peer).
 func RegisterRoom(local *net.UDPConn, stunAddr *net.UDPAddr, roomId string, password string) {
+	roomHash := sha256.Sum256([]byte(roomId))
+	passHash := sha256.Sum256([]byte(password))
+
 	payload, _ := json.Marshal(map[string]string{
-		"room_id":  roomId,
-		"password": password,
+		"room_id":  base64.StdEncoding.EncodeToString(roomHash[:]),
+		"password": base64.StdEncoding.EncodeToString(passHash[:]),
 	})
 
 	_, err := local.WriteToUDP(payload, stunAddr)
@@ -113,9 +116,12 @@ func HolePunch(local *net.UDPConn, peerUDPAddr *net.UDPAddr) {
 }
 
 func EarlyDestruct(local *net.UDPConn, stun *net.UDPAddr, roomId string, password string) {
+	roomHash := sha256.Sum256([]byte(roomId))
+	passHash := sha256.Sum256([]byte(password))
+
 	command, _ := json.Marshal(map[string]string{
-		"room_id":  roomId,
-		"password": password,
+		"room_id":  base64.StdEncoding.EncodeToString(roomHash[:]),
+		"password": base64.StdEncoding.EncodeToString(passHash[:]),
 		"action":   "DESTROY",
 	})
 
