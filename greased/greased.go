@@ -20,8 +20,6 @@ func InitClient(localPort int, stun string) (*net.UDPConn, *net.UDPAddr) {
 		log.Fatalln("Failed to bind UDP socket:", err)
 	}
 
-	fmt.Printf("[*] Client bound to local port: %d\n", local.LocalAddr().(*net.UDPAddr).Port)
-
 	stunAddr, err := net.ResolveUDPAddr("udp", stun)
 	if err != nil {
 		log.Fatalln(err)
@@ -41,7 +39,6 @@ func RegisterRoom(local *net.UDPConn, stunAddr *net.UDPAddr, roomId string, pass
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("[*] Room %s registered with STUN server. Waiting for peer...\n", roomId)
 }
 
 // WaitForPeer blocks until the STUN server responds with the peer address when a second client joins.
@@ -67,14 +64,12 @@ func WaitForPeer(local *net.UDPConn, stunAddr *net.UDPAddr) *net.UDPAddr {
 		log.Fatalln("Invalid peer address:", err)
 	}
 
-	fmt.Printf("[+] Got peer address: %s.\n", peerUDPAddr.String())
 	return peerUDPAddr
 }
 
 // HolePunch takes the established connection and peer address,
 // then performs UDP hole punching until a direct P2P connection is made.
 func HolePunch(local *net.UDPConn, peerUDPAddr *net.UDPAddr) {
-	fmt.Printf("[*] Starting hole punch to %s...\n", peerUDPAddr.String())
 
 	buf := make([]byte, 2048)
 	punch := make(chan struct{})
@@ -94,19 +89,18 @@ func HolePunch(local *net.UDPConn, peerUDPAddr *net.UDPAddr) {
 
 	// Listen for direct connection from the peer
 	for {
-		n, remoteAddr, err := local.ReadFromUDP(buf)
+		_, remoteAddr, err := local.ReadFromUDP(buf)
 		if err != nil {
 			continue
 		}
 
 		if remoteAddr.String() == peerUDPAddr.String() {
 			close(punch) // Stop punching once heard from peer
-			fmt.Printf("[SUCCESS] Direct P2P connection established with %s!\n", remoteAddr)
 
-			msg := string(buf[:n])
-			if msg != "PUNCH" {
-				fmt.Printf("Peer: %s\n", msg)
-			}
+			// msg := string(buf[:n])
+			// if msg != "PUNCH" {
+			// 	fmt.Printf("Peer: %s\n", msg)
+			// }
 			break
 		}
 	}

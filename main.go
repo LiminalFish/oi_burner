@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"oi_burner/greased"
 	"os"
 	"strings"
 	"time"
@@ -14,6 +15,11 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+)
+
+const (
+	localport    = 7001
+	stunserverip = "127.0.0.1:2121"
 )
 
 func main() {
@@ -177,9 +183,7 @@ func (m *chatModel) burn(notify bool) {
 		if notify {
 			// udp may drops packets so say it three times
 			for range 3 {
-				// ===== PENDING MODULE =====
-				// swap for: DestroySession(m.conn, m.peer)
-				send(m.conn, m.peer, packet{Action: actionDestroy})
+				greased.DestroySession(m.conn, m.peer)
 			}
 		}
 		m.conn.Close()
@@ -281,13 +285,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// one message per datagram, no framing. the write just hands the
 			// bytes to the kernel, so it's cheap enough to do inline
 
-			// ===== PENDING MODULE =====
-			// swap for: SendMessage(m.conn, m.peer, text), once it returns error
-			m.sendErr = send(m.conn, m.peer, packet{Action: actionMessage, Message: text})
-			if m.sendErr != nil {
-				m.appendMsg("!!ERR!! send failed: " + m.sendErr.Error())
-				return m, nil
-			}
+			greased.SendMessage(m.conn, m.peer, text)
 
 			m.appendMsg(m.senderStyle.Render("You: ") + text)
 			m.textarea.Reset()
@@ -327,6 +325,8 @@ type loginModel struct {
 	focused    int
 	connecting bool
 	err        error
+	conn       *net.UDPConn
+	stun       *net.UDPAddr
 }
 
 type connectedMsg struct {
@@ -336,27 +336,13 @@ type connectedMsg struct {
 
 type connectErrMsg struct{ err error }
 
-// this will be the UDP handshake logic later I think
-// ===== PENDING HIS MODULE =====
-// this whole body is a stub. his punch/connect call replaces everything inside
-// and has to hand back the SAME socket it handshook on, a fresh one loses the
-// nat hole. the STUN heartbeat while waiting for the other peer lives in there
-// too, not out here
-// =============================================================================
-func connect(room, pass string) tea.Cmd {
+func connect(room, pass string, local *net.UDPConn, stunAddr *net.UDPAddr) tea.Cmd {
 	return func() tea.Msg {
-		time.Sleep(3000 * time.Millisecond)
-		// temp logic to uhh show the uhh fail screen
-		if pass == "fail" {
-			return connectErrMsg{errors.New("wrong room code or password")}
-		}
-		// until the server exists, talk to ourselves on loopback so conn and
-		// peer are real and nothing will be nil
-		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-		if err != nil {
-			return connectErrMsg{err}
-		}
-		return connectedMsg{conn: conn, peer: conn.LocalAddr().(*net.UDPAddr)}
+		greased.RegisterRoom(local, stunAddr, room, pass)
+		peerAddr := greased.WaitForPeer(local, stunAddr)
+		greased.HolePunch(local, peerAddr)
+
+		return connectedMsg{conn: local, peer: peerAddr}
 	}
 }
 
@@ -405,10 +391,7 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
-				// ===== PENDING HIS MODULE =====
-				// EarlyDestruct(conn, stun, room, pass) goes here so the server
-				// stops holding a half matched room. blocked: we don't have the
-				// stun address or the conn on this screen yet
+				greased.EarlyDestruct(m.conn, m.stun, m.inputs[0].Value(), m.inputs[1].Value())
 				m.connecting = false
 				m.err = errors.New("Connection attempt revoked, room closed.")
 			}
@@ -428,7 +411,8 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.connecting, m.err = true, nil
-			return m, connect(room, pass)
+			m.conn, m.stun = greased.InitClient(localport, stunserverip)
+			return m, connect(room, pass, m.conn, m.stun)
 		}
 	}
 
